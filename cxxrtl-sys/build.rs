@@ -1,7 +1,7 @@
 extern crate bindgen;
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -13,6 +13,8 @@ fn main() {
         .output()
         .expect("failed to get yosys include dir");
     let include = String::from_utf8_lossy(&output.stdout);
+    let capi = Path::new(include.trim()).join("backends/cxxrtl/cxxrtl_capi.cc");
+    let vcd_capi = Path::new(include.trim()).join("backends/cxxrtl/cxxrtl_vcd_capi.cc");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
@@ -26,7 +28,7 @@ fn main() {
         // bindings for.
         .header("wrapper.h")
         // Load at runtime
-        .dynamic_library_name("cxxrtl")
+        // .dynamic_library_name("cxxrtl")
         // make Rust enum
         // .default_enum_style(bindgen::EnumVariation::Rust{non_exhaustive:false})
         // Tell cargo to invalidate the built crate whenever any of the
@@ -42,4 +44,12 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    cc::Build::new()
+        .include(include.trim())
+        .cpp(true)
+        .file(capi)
+        .file(vcd_capi)
+        .flag_if_supported("-std=c++14")
+        .compile("cxxrtl");
 }
