@@ -5,7 +5,8 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 impl cxxrtl {
-    pub unsafe fn cxxrtl_get(&self,
+    pub unsafe fn cxxrtl_get(
+        &self,
         handle: cxxrtl_handle,
         name: *const ::std::os::raw::c_char,
     ) -> *mut cxxrtl_object {
