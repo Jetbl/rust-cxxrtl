@@ -24,6 +24,8 @@ impl Timescale {
     }
 }
 
+pub trait FilterClosure: FnMut(&str, CxxrtlObject) -> bool {}
+
 pub struct Vcd {
     vcd: cxxrtl_sys::cxxrtl_vcd,
 }
@@ -49,9 +51,9 @@ impl Vcd {
 
     pub fn add_if<F>(&mut self, handle: &CxxrtlHandle, mut f: F)
     where
-        F: FnMut(&str, CxxrtlObject) -> bool,
+        F: FilterClosure,
     {
-        pub type Filter = unsafe extern "C" fn(
+        type Filter = unsafe extern "C" fn(
             data: *mut c_void,
             name: *const c_char,
             object: *const cxxrtl_object,
@@ -63,18 +65,18 @@ impl Vcd {
             object: *const cxxrtl_object,
         ) -> c_int
         where
-            F: FnMut(&str, CxxrtlObject) -> bool,
+            F: FilterClosure,
         {
-            let data = &mut *(data as *mut F);
+            let f = &mut *(data as *mut F);
             let name = CStr::from_ptr(name);
             let obj = CxxrtlObject::new(object as *mut _);
-            let ret = data(name.to_str().unwrap(), obj);
+            let ret = f(name.to_str().unwrap(), obj);
             ret as i32 as _
         }
 
         pub fn get_filter<F>(_closure: &F) -> Filter
         where
-            F: FnMut(&str, CxxrtlObject) -> bool,
+            F: FilterClosure,
         {
             trampoline::<F>
         }
