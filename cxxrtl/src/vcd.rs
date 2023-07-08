@@ -1,13 +1,17 @@
-use std::io::Write;
+use std::{
+    ffi::{c_char, c_int, c_void, CStr, CString},
+    io::Write,
+};
 
 use cxxrtl_sys::{
+    cxxrtl_object, cxxrtl_vcd_add_from, cxxrtl_vcd_add_from_if,
     cxxrtl_vcd_add_from_without_memories, cxxrtl_vcd_create, cxxrtl_vcd_destroy, cxxrtl_vcd_read,
     cxxrtl_vcd_sample, cxxrtl_vcd_timescale,
 };
 
-use crate::CxxrtlHandle;
+use crate::{CxxrtlHandle, CxxrtlObject};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Timescale {
     Us(i32),
 }
@@ -21,8 +25,9 @@ impl Timescale {
 }
 
 pub struct Vcd {
-    pub(crate) vcd: cxxrtl_sys::cxxrtl_vcd,
+    vcd: cxxrtl_sys::cxxrtl_vcd,
 }
+
 impl Vcd {
     pub fn new() -> Self {
         Vcd {
@@ -32,7 +37,53 @@ impl Vcd {
 
     pub fn timescale(&mut self, scale: Timescale) {
         let (n, unit) = scale.values();
+        let unit = CString::new(unit).unwrap();
         unsafe { cxxrtl_vcd_timescale(self.vcd, n, unit.as_bytes().as_ptr() as *const _) }
+    }
+
+    pub fn add(&mut self, handle: &CxxrtlHandle) {
+        unsafe {
+            cxxrtl_vcd_add_from(self.vcd, handle.handle);
+        }
+    }
+
+    pub fn add_if<F>(&mut self, handle: &CxxrtlHandle, mut f: F)
+    where
+        F: FnMut(&str, CxxrtlObject) -> bool,
+    {
+        pub type Filter = unsafe extern "C" fn(
+            data: *mut c_void,
+            name: *const c_char,
+            object: *const cxxrtl_object,
+        ) -> c_int;
+
+        unsafe extern "C" fn trampoline<F>(
+            data: *mut c_void,
+            name: *const c_char,
+            object: *const cxxrtl_object,
+        ) -> c_int
+        where
+            F: FnMut(&str, CxxrtlObject) -> bool,
+        {
+            let data = &mut *(data as *mut F);
+            let name = CStr::from_ptr(name);
+            let obj = CxxrtlObject::new(object as *mut _);
+            let ret = data(name.to_str().unwrap(), obj);
+            ret as i32 as _
+        }
+
+        pub fn get_filter<F>(_closure: &F) -> Filter
+        where
+            F: FnMut(&str, CxxrtlObject) -> bool,
+        {
+            trampoline::<F>
+        }
+
+        let filter = get_filter(&f);
+        let data = &mut f as *mut _ as *mut c_void;
+        unsafe {
+            cxxrtl_vcd_add_from_if(self.vcd, handle.handle, data, Some(filter));
+        }
     }
 
     pub fn add_without_memories(&mut self, handle: &CxxrtlHandle) {

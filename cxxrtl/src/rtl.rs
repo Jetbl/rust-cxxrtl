@@ -49,7 +49,7 @@ impl<const N: u32> Value<N> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum CxxrtlType {
     Value,
@@ -68,32 +68,55 @@ pub enum CxxrtlFlag {
     Undriven,
 }
 
-pub struct CxxrtlObject<const N: u32> {
-    // obj: *mut cxxrtl_object,
+pub struct CxxrtlSignal<const N: u32> {
     curr: Value<N>,
     next: Option<Value<N>>,
-    // flags: Vec<CxxrtlFlag>,
 }
 
-impl<const N: u32> CxxrtlObject<N> {
+impl<const N: u32> CxxrtlSignal<N> {
+    pub fn set<I: UInt>(&mut self, val: I) {
+        if let Some(next) = &mut self.next {
+            next.set(val);
+        }
+    }
+
+    pub fn get<I: UInt + Default>(&self) -> I {
+        self.curr.get()
+    }
+}
+
+pub struct CxxrtlMemory<const N: u32> {
+    curr: Value<N>,
+}
+
+impl<const N: u32> CxxrtlMemory<N> {
+    pub fn get<I: UInt + Default>(&self) -> I {
+        self.curr.get()
+    }
+}
+
+#[derive(Debug)]
+pub struct CxxrtlObject {
+    obj: *mut cxxrtl_object,
+    pub flags: Vec<CxxrtlFlag>,
+    pub r#type: CxxrtlType,
+    pub width: u64,
+    pub lsb: u64,
+}
+
+impl CxxrtlObject {
     pub fn new(obj: *mut cxxrtl_object) -> Self {
         let width = unsafe { (*obj).width };
-        debug_assert!(N as u64 == width);
-        let type_ = unsafe { std::mem::transmute::<u32, CxxrtlType>((*obj).type_) };
-        dbg!(type_);
+        let r#type = unsafe { std::mem::transmute::<u32, CxxrtlType>((*obj).type_) };
         let flags = Self::flags(unsafe { (*obj).flags });
-        dbg!(&flags);
         let lsb = unsafe { (*obj).lsb_at };
-        assert!(lsb == 0);
-
-        let curr = unsafe { Value::new((*obj).curr) };
-        let next = (unsafe { *obj }).next;
-        let next = (!next.is_null()).then_some(unsafe { Value::new(next) });
 
         Self {
-            // obj,
-            curr,
-            next, // flags,
+            obj,
+            flags,
+            r#type,
+            lsb,
+            width,
         }
     }
 
@@ -112,15 +135,25 @@ impl<const N: u32> CxxrtlObject<N> {
             .collect()
     }
 
-    pub fn set<I: UInt>(&mut self, val: I) {
-        self.next
-            .as_mut()
-            .expect("next should not be none")
-            .set(val)
+    fn values<const N: u32>(&self) -> (Value<N>, Option<Value<N>>) {
+        let curr = unsafe { Value::new((*self.obj).curr) };
+        let next = (unsafe { *self.obj }).next;
+        let next = (!next.is_null()).then_some(unsafe { Value::new(next) });
+        (curr, next)
     }
 
-    pub fn get<I: UInt + Default>(&self) -> I {
-        self.curr.get()
+    pub fn signal<const N: u32>(&self) -> CxxrtlSignal<N> {
+        assert!(
+            matches!(self.r#type, CxxrtlType::Value) || matches!(self.r#type, CxxrtlType::Wire)
+        );
+        let (curr, next) = self.values();
+        CxxrtlSignal { curr, next }
+    }
+
+    pub fn memory<const N: u32>(&self) -> CxxrtlMemory<N> {
+        assert!(matches!(self.r#type, CxxrtlType::Memory));
+        let (curr, _) = self.values();
+        CxxrtlMemory { curr }
     }
 }
 
@@ -134,7 +167,7 @@ impl CxxrtlHandle {
         Self { handle }
     }
 
-    pub fn get<const N: u32>(&self, name: &str) -> Option<CxxrtlObject<N>> {
+    pub fn get(&self, name: &str) -> Option<CxxrtlObject> {
         let cs = CString::new(name).expect("CString::new failed");
         let obj = unsafe { cxxrtl_get(self.handle, cs.as_ptr()) };
         (!obj.is_null()).then_some(CxxrtlObject::new(obj))
