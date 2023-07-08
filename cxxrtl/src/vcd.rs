@@ -12,14 +12,31 @@ use cxxrtl_sys::{
 use crate::{CxxrtlHandle, CxxrtlObject};
 
 #[derive(Clone, Copy, Debug)]
-pub enum Timescale {
-    Us(i32),
+pub enum TimescaleUnit {
+    Us,
 }
 
-impl Timescale {
-    fn values(&self) -> (i32, &'static str) {
+impl TimescaleUnit {
+    fn unit_str(&self) -> &'static str {
         match *self {
-            Timescale::Us(n) => (n, "us"),
+            TimescaleUnit::Us => "us",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum TimescaleNumber {
+    One,
+    Ten,
+    Hundred,
+}
+
+impl TimescaleNumber {
+    fn unit_number(&self) -> i32 {
+        match *self {
+            TimescaleNumber::One => 1,
+            TimescaleNumber::Ten => 10,
+            TimescaleNumber::Hundred => 100,
         }
     }
 }
@@ -37,10 +54,15 @@ impl Vcd {
         }
     }
 
-    pub fn timescale(&mut self, scale: Timescale) {
-        let (n, unit) = scale.values();
-        let unit = CString::new(unit).unwrap();
-        unsafe { cxxrtl_vcd_timescale(self.vcd, n, unit.as_bytes().as_ptr() as *const _) }
+    pub fn timescale(&mut self, number: TimescaleNumber, unit: TimescaleUnit) {
+        let unit = CString::new(unit.unit_str()).unwrap();
+        unsafe {
+            cxxrtl_vcd_timescale(
+                self.vcd,
+                number.unit_number(),
+                unit.as_bytes().as_ptr() as *const _,
+            )
+        }
     }
 
     pub fn add(&mut self, handle: &CxxrtlHandle) {
