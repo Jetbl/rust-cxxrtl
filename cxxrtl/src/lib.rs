@@ -25,7 +25,6 @@ pub struct Value<const N: u32> {
 
 impl<const N: u32> Value<N> {
     const CHUNKS: u32 = (N + u32::BITS - 1) / u32::BITS;
-    const MASK: u32 = u32::MAX;
 
     pub unsafe fn new(data: *mut u32) -> Self {
         // dbg!(data);
@@ -38,7 +37,7 @@ impl<const N: u32> Value<N> {
         let _ = Assert::<I, N>::GE;
         for n in 0..Self::CHUNKS {
             let chunk_val = val.get_chunk(n);
-            self.data[n as usize] = chunk_val & Self::MASK;
+            self.data[n as usize] = chunk_val;
         }
     }
 
@@ -76,7 +75,7 @@ pub enum CxxrtlFlag {
 pub struct CxxrtlObject<const N: u32> {
     // obj: *mut cxxrtl_object,
     curr: Value<N>,
-    next: Value<N>,
+    next: Option<Value<N>>,
     // flags: Vec<CxxrtlFlag>,
 }
 
@@ -88,13 +87,15 @@ impl<const N: u32> CxxrtlObject<N> {
         dbg!(type_);
         let flags = Self::flags(unsafe { (*obj).flags });
         dbg!(&flags);
-        unsafe {
-            Self {
-                // obj,
-                curr: Value::new((*obj).curr),
-                next: Value::new((*obj).next),
-                // flags,
-            }
+
+        let curr = unsafe { Value::new((*obj).curr) };
+        let next = (unsafe { *obj }).next;
+        let next = (!next.is_null()).then_some(unsafe { Value::new(next) });
+
+        Self {
+            // obj,
+            curr,
+            next, // flags,
         }
     }
 
@@ -115,7 +116,10 @@ impl<const N: u32> CxxrtlObject<N> {
     }
 
     pub fn set<I: UInt>(&mut self, val: I) {
-        self.next.set(val)
+        self.next
+            .as_mut()
+            .expect("next should not be none")
+            .set(val)
     }
 
     pub fn get<I: UInt + Default>(&self) -> I {
@@ -140,7 +144,7 @@ impl CxxrtlHandle {
     pub fn get<const N: u32>(&self, name: &str) -> Option<CxxrtlObject<N>> {
         let cs = CString::new(name).expect("CString::new failed");
         let obj = unsafe { self.sim.cxxrtl_get(self.handle, cs.as_ptr()) };
-        (!obj.is_null()).then(|| CxxrtlObject::new(obj))
+        (!obj.is_null()).then_some(CxxrtlObject::new(obj))
     }
 
     pub fn step(&mut self) {
