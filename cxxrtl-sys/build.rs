@@ -5,16 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    // shared library.
-    // println!("cargo:rustc-link-lib=ngspice");
-
     let output = Command::new("yosys-config")
         .args(&["--datdir/include"])
         .output()
         .expect("failed to get yosys include dir");
     let include = String::from_utf8_lossy(&output.stdout);
-    let capi = Path::new(include.trim()).join("backends/cxxrtl/cxxrtl_capi.cc");
-    let vcd_capi = Path::new(include.trim()).join("backends/cxxrtl/cxxrtl_vcd_capi.cc");
 
     // Tell cargo to invalidate the built crate whenever the wrapper changes
     println!("cargo:rerun-if-changed=wrapper.h");
@@ -27,10 +22,6 @@ fn main() {
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
-        // Load at runtime
-        // .dynamic_library_name("cxxrtl")
-        // make Rust enum
-        // .default_enum_style(bindgen::EnumVariation::Rust{non_exhaustive:false})
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks))
@@ -45,6 +36,8 @@ fn main() {
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
 
+    let capi = Path::new(include.trim()).join("backends/cxxrtl/cxxrtl_capi.cc");
+    let vcd_capi = Path::new(include.trim()).join("backends/cxxrtl/cxxrtl_vcd_capi.cc");
     cc::Build::new()
         .include(include.trim())
         .cpp(true)
