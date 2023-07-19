@@ -170,7 +170,7 @@ impl CxxrtlHandle {
     pub fn get(&self, name: &str) -> Option<CxxrtlObject> {
         let cs = CString::new(name).expect("CString::new failed");
         let obj = unsafe { cxxrtl_get(self.handle, cs.as_ptr()) };
-        (!obj.is_null()).then_some(CxxrtlObject::new(obj))
+        (!obj.is_null()).then(|| CxxrtlObject::new(obj))
     }
 
     pub fn step(&mut self) {
