@@ -6,7 +6,7 @@ use std::process::Command;
 
 fn main() {
     let output = Command::new("yosys-config")
-        .args(&["--datdir/include"])
+        .args(["--datdir/include"])
         .output()
         .expect("failed to get yosys include dir");
     let include = String::from_utf8_lossy(&output.stdout);

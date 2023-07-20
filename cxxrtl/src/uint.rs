@@ -1,5 +1,27 @@
 use std::convert::TryFrom;
 
+pub trait AsBool {
+    fn as_bool(&self) -> bool;
+}
+
+macro_rules! impl_as_bool {
+    ($($typ:ty)+) => {
+        $(
+          impl AsBool for $typ {
+            fn as_bool(&self) -> bool{
+                    match *self {
+                        0 => false,
+                        1 => true,
+                        v => panic!("Unsuported value {}", v),
+                    }
+                }
+          }
+        )+
+    };
+}
+
+impl_as_bool! {u8 u16 u32}
+
 pub trait UInt {
     const BITS: u32;
 

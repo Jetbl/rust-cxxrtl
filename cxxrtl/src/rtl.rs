@@ -13,7 +13,10 @@ struct Assert<I: UInt, const N: u32> {
 }
 
 impl<I: UInt, const N: u32> Assert<I, N> {
-    const GE: () = assert!(I::BITS >= N, "Greater or equals");
+    const GE: bool = {
+        assert!(I::BITS >= N, "Greater or equals");
+        false
+    };
 }
 
 pub struct Value<const N: u32> {
@@ -23,7 +26,7 @@ pub struct Value<const N: u32> {
 impl<const N: u32> Value<N> {
     const CHUNKS: u32 = (N + u32::BITS - 1) / u32::BITS;
 
-    pub unsafe fn new(data: *mut u32) -> Self {
+    pub(crate) unsafe fn new(data: *mut u32) -> Self {
         // dbg!(data);
         Self {
             data: std::slice::from_raw_parts_mut(data, Value::<N>::CHUNKS as usize),
@@ -105,7 +108,7 @@ pub struct CxxrtlObject {
 }
 
 impl CxxrtlObject {
-    pub fn new(obj: *mut cxxrtl_object) -> Self {
+    pub(crate) fn new(obj: *mut cxxrtl_object) -> Self {
         let width = unsafe { (*obj).width };
         let r#type = unsafe { std::mem::transmute::<u32, CxxrtlType>((*obj).type_) };
         let flags = Self::flags(unsafe { (*obj).flags });
@@ -143,8 +146,11 @@ impl CxxrtlObject {
     }
 
     pub fn signal<const N: u32>(&self) -> CxxrtlSignal<N> {
+        // dbg!(self.r#type);
         assert!(
-            matches!(self.r#type, CxxrtlType::Value) || matches!(self.r#type, CxxrtlType::Wire)
+            matches!(self.r#type, CxxrtlType::Value)
+                || matches!(self.r#type, CxxrtlType::Wire)
+                || matches!(self.r#type, CxxrtlType::Alias)
         );
         let (curr, next) = self.values();
         CxxrtlSignal { curr, next }

@@ -12,7 +12,8 @@ pub unsafe fn cxxrtl_get(
     let object = cxxrtl_get_parts(handle, name, &mut parts);
     assert!(object.is_null() || parts == 1);
     if object.is_null() || parts == 1 {
-        return object;
+        object
+    } else {
+        std::ptr::null_mut()
     }
-    return std::ptr::null_mut();
 }

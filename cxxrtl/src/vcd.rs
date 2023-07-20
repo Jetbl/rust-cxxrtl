@@ -143,3 +143,9 @@ impl Drop for Vcd {
         unsafe { cxxrtl_vcd_destroy(self.vcd) };
     }
 }
+
+impl Default for Vcd {
+    fn default() -> Self {
+        Self::new()
+    }
+}
