@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
-    "cxxrtl-sys",
     "cxxrtl",
+    "cxxrtl-sys",
+    "cxxrtl-sim",
 ]
