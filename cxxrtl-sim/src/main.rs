@@ -1,7 +1,10 @@
 use clap::Parser;
 use cxxrtl::{CxxrtlHandle, CxxrtlSignal, _cxxrtl_toplevel};
-use serde::ser::{SerializeMap, SerializeSeq};
+use futures::future::{self, Either};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::{
     collections::HashMap,
     error::Error,
@@ -11,6 +14,10 @@ use std::{
     process::Command,
     slice::Iter,
 };
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::task::JoinError;
+
+use tokio::{runtime, task};
 
 #[derive(Parser)]
 struct Cli {
@@ -25,6 +32,18 @@ struct Cli {
     /// Sets the data file
     #[arg(short, long, value_name = "DATA_FILE")]
     data_file: PathBuf,
+
+    /// Sets the randomize
+    #[arg(long)]
+    randomize: Option<usize>,
+
+    /// Sets the number of reset cycles
+    #[arg(long, default_value_t = 3)]
+    reset_cycles: usize,
+
+    /// Sets the number of max cycles
+    #[arg(long, default_value_t = 10000)]
+    max_cycles: usize,
 }
 
 struct Builder {
@@ -80,14 +99,16 @@ struct Event {
     phantom: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Interface {
     #[serde(flatten)]
     event: Event,
     name: String,
+    #[serde(skip)]
+    cxxrtl_signal: Option<CxxrtlSignal<1>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Interfaces {
     interfaces: Vec<Interface>,
     inputs: Vec<Signal>,
@@ -96,8 +117,31 @@ struct Interfaces {
 
 impl Interfaces {
     fn validate(&self) {
-        assert!(self.interfaces.len() > 0, "blabla");
-        assert!(self.interfaces.len() == 1, "blabla");
+        assert!(self.interfaces.len() > 0, "No interfaces defined");
+        assert!(
+            self.interfaces.len() == 1,
+            "Unsupported: multiple interfaces"
+        );
+    }
+
+    fn set_cxxrtl_signals(&mut self, dut: &Dut) {
+        for interface in &mut self.interfaces {
+            if !interface.event.phantom {
+                interface.cxxrtl_signal = dut.handle.get(&interface.name).map(|o| o.signal());
+            }
+        }
+        for signal in &mut self.inputs {
+            signal.cxxrtl_signal = dut.handle.get(&signal.name).map(|o| {
+                assert!(signal.width == o.width as usize);
+                o.signal()
+            });
+        }
+        for signal in &mut self.outputs {
+            signal.cxxrtl_signal = dut.handle.get(&signal.name).map(|o| {
+                assert!(signal.width == o.width as usize);
+                o.signal()
+            });
+        }
     }
 }
 
@@ -108,12 +152,14 @@ struct Interval {
     end: usize,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Signal {
     name: String,
     width: usize,
     #[serde(flatten)]
     interval: Interval,
+    #[serde(skip)]
+    cxxrtl_signal: Option<CxxrtlSignal<32>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -232,14 +278,11 @@ impl Output {
 }
 
 struct Dut {
-    handle: CxxrtlHandle,
-    clk: CxxrtlSignal<1>,
-    interfaces: Interfaces,
-    cycles: usize,
+    handle: Arc<CxxrtlHandle>,
 }
 
 impl Dut {
-    fn new<P: AsRef<OsStr>>(lib: P, interfaces: Interfaces) -> Self {
+    fn new<P: AsRef<OsStr>>(lib: P) -> Self {
         let handle = unsafe {
             let lib = libloading::Library::new(lib).unwrap();
             let func: libloading::Symbol<unsafe extern "C" fn() -> *mut _cxxrtl_toplevel> =
@@ -249,72 +292,58 @@ impl Dut {
             CxxrtlHandle::new(top)
         };
 
-        let clk = handle.get("clk").unwrap().signal();
         Self {
-            handle,
-            clk,
-            interfaces,
-            cycles: 0,
+            handle: Arc::new(handle),
         }
     }
+}
 
-    fn process(&mut self, input: Input) -> Output {
-        println!("{input:?}");
-        let interface = &self.interfaces.interfaces[0];
-        let event = &interface.event;
-        let mut output = Output::new();
-        for st in 0..event.states {
-            let trg = st == 0;
-            if !event.phantom {
-                self.handle
-                    .get(&interface.name)
-                    .expect(&format!("cannot found interface {}", &event.name))
-                    .signal::<1>()
-                    .set(trg);
-            }
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClockEdge {
+    Rising,
+    Falling,
+}
 
-            // Sets input values
-            for inp in &self.interfaces.inputs {
-                let interval = &inp.interval;
-                assert!(interval.event == event.name);
-                if st >= interval.start && st < interval.end {
-                    let value = input.input[&inp.name];
-                    self.handle
-                        .get(&inp.name)
-                        .expect(&format!("cannot found signal for input {}", &inp.name))
-                        .signal::<32>()
-                        .set(value);
-                }
-            }
+struct Clock {
+    handle: Arc<CxxrtlHandle>,
+    clk: CxxrtlSignal<1>,
+    reset: CxxrtlSignal<1>,
+}
 
-            // Wait for the falling edge so that combinational computations
-            // propagate.
+impl Clock {
+    fn new(handle: Arc<CxxrtlHandle>) -> Option<Self> {
+        let clk = handle.get("clk")?.signal();
+        let reset = handle.get("reset")?.signal::<1>();
+        Some(Self { handle, clk, reset })
+    }
+    async fn reset(&mut self, mut reset_cycles: usize) {
+        self.reset.set(true);
+        while reset_cycles > 0 {
             self.clk.set(false);
             self.handle.step();
-
-            // For each output, record the value if we expect it to be valid
-            for out in &self.interfaces.outputs {
-                let interval = &out.interval;
-                assert!(interval.event == event.name);
-                if st >= interval.start && st < interval.end {
-                    let value = self
-                        .handle
-                        .get(&out.name)
-                        .expect(&format!("cannot found signal for input {}", &out.name))
-                        .signal::<32>()
-                        .get();
-
-                    output.insert(&out.name, value);
-                }
-            }
-
-            // Wait for end of cycle
             self.clk.set(true);
             self.handle.step();
-            self.cycles += 1;
+            reset_cycles -= 1;
         }
+        self.reset.set(false);
+    }
 
-        output
+    async fn start(&mut self, tx: Sender<ClockEdge>, max_cycles: usize, count: Arc<AtomicUsize>) {
+        for _ in 0..max_cycles {
+            self.clk.set(false);
+            self.handle.step();
+            while let Err(_) = tx.send(ClockEdge::Falling) {
+                task::yield_now().await;
+            }
+            task::yield_now().await;
+            self.clk.set(true);
+            self.handle.step();
+            while let Err(_) = tx.send(ClockEdge::Rising) {
+                task::yield_now().await;
+            }
+            count.fetch_add(1, Ordering::Relaxed);
+            task::yield_now().await;
+        }
     }
 }
 
@@ -324,10 +353,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !out.exists() {
         std::fs::create_dir(&out)?;
     }
-
-    let interfaces_file = File::open(cli.interface_file)?;
-    let interfaces: Interfaces = serde_json::from_reader(interfaces_file)?;
-    interfaces.validate();
 
     let data_file = File::open(cli.data_file)?;
     let data: DataInput = serde_json::from_reader(data_file)?;
@@ -339,28 +364,131 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dest = out.join(file_name).with_extension("so");
     builder.build(&source, &dest)?;
 
-    let mut dut = Dut::new(&dest, interfaces);
-    let mut outputs = DataOutput::new();
+    let interfaces_file = File::open(cli.interface_file)?;
+    let mut interfaces: Interfaces = serde_json::from_reader(interfaces_file)?;
+    interfaces.validate();
+    let dut = Dut::new(&dest);
+    interfaces.set_cxxrtl_signals(&dut);
 
-    println!("{data:?}");
-    outputs.extend(data.iter().map(|input| dut.process(input)).enumerate());
-    outputs.cycles = dut.cycles;
-    let res = serde_json::to_string(&outputs)?;
-    println!("{outputs:?}");
-    println!("{res:?}");
+    let rt = runtime::Builder::new_current_thread().build()?;
+    let outputs = rt.block_on(async {
+        let randomize = cli.randomize;
+        let reset_cycles = cli.reset_cycles;
+        let max_cycles = cli.max_cycles;
+
+        let (clk_ch_tx, _) = tokio::sync::broadcast::channel(1);
+
+        // setup the design
+        for interface in &interfaces.interfaces {
+            if !interface.event.phantom {
+                interface.cxxrtl_signal.as_ref().unwrap().set(false);
+            }
+        }
+        let mut clk = Clock::new(dut.handle.clone()).unwrap();
+        clk.reset(reset_cycles).await;
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let clk_tx = clk_ch_tx.clone();
+        let cycles_count = count.clone();
+        let clk_handle =
+            tokio::spawn(async move { clk.start(clk_tx, max_cycles, cycles_count).await });
+
+        let interfaces = Arc::new(interfaces);
+        let clk_tx = clk_ch_tx.clone();
+        // let main_handle = task::spawn(process(data, clk_ch_tx, interfaces, randomize));
+        let main_handle = task::spawn(async move {
+            let mut rx = clk_tx.subscribe();
+            // New transaction should only trigger at the start of a cycle
+            while rx.recv().await != Ok(ClockEdge::Rising) {}
+
+            let mut outputs = vec![];
+            let event = &interfaces.interfaces[0].event;
+
+            for input in data.iter() {
+                // spaw a one transaction input
+                outputs.push(task::spawn(process_input(
+                    input,
+                    clk_tx.subscribe(),
+                    interfaces.clone(),
+                )));
+
+                // compute a randomize delay
+                let delay = event.delay
+                    + if let Some(randomize) = randomize {
+                        rand::random::<usize>() % randomize
+                    } else {
+                        0
+                    };
+
+                // wait for delay cycles
+                for _ in 0..delay {
+                    while rx.recv().await != Ok(ClockEdge::Rising) {}
+                }
+            }
+
+            future::join_all(outputs).await
+        });
+
+        match future::select(clk_handle, main_handle).await {
+            Either::Left((_, _)) => Err(count.load(Ordering::Relaxed)),
+            Either::Right((outputs, _)) => {
+                let outputs: Result<Vec<Output>, JoinError> =
+                    outputs.unwrap().into_iter().collect();
+                Ok((outputs.unwrap(), count.load(Ordering::Relaxed)))
+            }
+        }
+    });
+
+    let outputs = outputs.unwrap();
+    let mut data_outputs = DataOutput::new();
+    data_outputs.extend(outputs.0.into_iter().enumerate());
+    // also substract the 1 cycle it takes to propagate the go signal
+    data_outputs.cycles = outputs.1 - 1;
+    print!("{}", serde_json::to_string(&data_outputs)?);
     Ok(())
 }
 
-// {
-// "interfaces": [
-// {"name": "go", "event": "G", "delay": 3, "states": 2, "phantom": false }
-// ],
-// "inputs": [
-// { "event": "G", "name": "left", "width": 32 , "start": 0, "end": 1 },
-// { "event": "G", "name": "right", "width": 32 , "start": 0, "end": 1 }
-// ],
-// "outputs": [
-// { "event": "G", "name": "out", "width": 32 , "start": 1, "end": 2 }
-// ]
-// }
-// }
+async fn process_input(
+    input: Input,
+    mut clk_rx: Receiver<ClockEdge>,
+    interfaces: Arc<Interfaces>,
+) -> Output {
+    let interface = &interfaces.interfaces[0];
+    let event = &interface.event;
+    let mut output = Output::new();
+    for st in 0..event.states {
+        let trg = st == 0;
+        if !event.phantom {
+            interface.cxxrtl_signal.as_ref().unwrap().set(trg);
+        }
+
+        // Sets input values
+        for inp in &interfaces.inputs {
+            let interval = &inp.interval;
+            assert!(interval.event == event.name);
+            if st >= interval.start && st < interval.end {
+                let value = input.input[&inp.name];
+                inp.cxxrtl_signal.as_ref().unwrap().set(value);
+            }
+        }
+
+        // Wait for the falling edge so that combinational computations
+        // propagate.
+        while clk_rx.recv().await != Ok(ClockEdge::Falling) {}
+
+        // For each output, record the value if we expect it to be valid
+        for out in &interfaces.outputs {
+            let interval = &out.interval;
+            assert!(interval.event == event.name);
+            if st >= interval.start && st < interval.end {
+                let value = out.cxxrtl_signal.as_ref().unwrap().get();
+                output.insert(&out.name, value);
+            }
+        }
+
+        // Wait for end of cycle
+        while clk_rx.recv().await != Ok(ClockEdge::Rising) {}
+    }
+
+    output
+}

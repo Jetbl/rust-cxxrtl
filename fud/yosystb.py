@@ -36,13 +36,8 @@ class YosystbExecBase(Stage):
     def defaults():
         root = Path(__file__).parent.parent.resolve()
         exec = (root / "target" / "debug" / "cxxrtl-sim").resolve()
-        # # Location of the yosystb harness
-        # self_loc = Path(__file__).parent.resolve()
-        # common = (self_loc / "harness").resolve()
         return {
-        #     "common": str(common),
             "exec": str(exec),
-        #     "library": str(root),
         }
 
     def save_file(self, builder, stream, dir, filename):
@@ -166,25 +161,10 @@ class YosystbExecBase(Stage):
             """
             # Switch to the tmpdir
             os.chdir(Path(dir))
-            print(f"dir={dir}")
             # Randomize value
             randomize = config.get(["stages", self.name, "randomize"])
             # Number of reset cycles
             reset_cycles = config.get(["stages", self.name, "reset_cycles"])
-            # Execute the make command
-            # cmd = " ".join(
-            #     [
-            #         "COMPILE_ARGS='-DICARUS -gstrict-ca-eval'",
-            #         "make",
-            #         "-B",
-            #         # XXX(rachit): we shouldn't need this .data here
-            #         f"INTERFACE={interface.data}",
-            #         f"DATA_FILE={data.data}",
-            #         f"RANDOMIZE={int(randomize)}" if randomize is not None else "",
-            #         f"RESET_CYCLES={reset_cycles}" if reset_cycles is not None else "",
-            #     ]
-            # )
-            # return shell(cmd)
             cmd = " ".join(
                 [
                     config["stages", self.name, "exec"],

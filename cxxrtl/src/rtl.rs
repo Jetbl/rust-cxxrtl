@@ -20,7 +20,7 @@ impl<I: UInt, const N: u32> Assert<I, N> {
 }
 
 pub struct Value<const N: u32> {
-    data: &'static mut [u32],
+    data: *mut u32,
 }
 
 impl<const N: u32> Value<N> {
@@ -28,27 +28,31 @@ impl<const N: u32> Value<N> {
 
     pub(crate) unsafe fn new(data: *mut u32) -> Self {
         // dbg!(data);
-        Self {
-            data: std::slice::from_raw_parts_mut(data, Value::<N>::CHUNKS as usize),
-        }
+        Self { data }
     }
 
-    pub fn set<I: UInt>(&mut self, val: I) {
+    pub fn set<I: UInt>(&self, val: I) {
         let _ = Assert::<I, N>::GE;
+        let data = self.get_slice();
         for n in 0..Self::CHUNKS {
             let chunk_val = val.get_chunk(n);
-            self.data[n as usize] = chunk_val;
+            data[n as usize] = chunk_val;
         }
     }
 
     pub fn get<I: UInt + Default>(&self) -> I {
         let _ = Assert::<I, N>::GE;
         let mut result = I::default();
+        let data = self.get_slice();
         for n in 0..Self::CHUNKS {
-            let chunk_val = self.data[n as usize];
+            let chunk_val = data[n as usize];
             result.set_chunk(n, chunk_val);
         }
         result
+    }
+
+    fn get_slice(&self) -> &mut [u32] {
+        unsafe { std::slice::from_raw_parts_mut(self.data, Value::<N>::CHUNKS as usize) }
     }
 }
 
@@ -77,8 +81,8 @@ pub struct CxxrtlSignal<const N: u32> {
 }
 
 impl<const N: u32> CxxrtlSignal<N> {
-    pub fn set<I: UInt>(&mut self, val: I) {
-        if let Some(next) = &mut self.next {
+    pub fn set<I: UInt>(&self, val: I) {
+        if let Some(next) = &self.next {
             next.set(val);
         }
     }
@@ -163,9 +167,15 @@ impl CxxrtlObject {
     }
 }
 
+unsafe impl<const N: u32> Send for CxxrtlSignal<N> {}
+unsafe impl<const N: u32> Sync for CxxrtlSignal<N> {}
+
 pub struct CxxrtlHandle {
     pub(crate) handle: *mut _cxxrtl_handle,
 }
+
+unsafe impl Send for CxxrtlHandle {}
+unsafe impl Sync for CxxrtlHandle {}
 
 impl CxxrtlHandle {
     pub unsafe fn new(top: *mut _cxxrtl_toplevel) -> Self {
@@ -179,7 +189,7 @@ impl CxxrtlHandle {
         (!obj.is_null()).then(|| CxxrtlObject::new(obj))
     }
 
-    pub fn step(&mut self) {
+    pub fn step(&self) {
         unsafe { cxxrtl_step(self.handle) };
     }
 }
