@@ -164,13 +164,15 @@ class YosystbExecBase(Stage):
             # Randomize value
             randomize = config.get(["stages", self.name, "randomize"])
             # Number of reset cycles
-            reset_cycles = config.get(["stages", self.name, "reset_cycles"])
+            reset_cycles = config.get(["stages", self.name, "reset-cycles"])
+
             cmd = " ".join(
                 [
                     config["stages", self.name, "exec"],
                     f"-i={interface.data}",
                     f"-v=out.sv",
                     f"-d={data.data}",
+                    f"--reset-cycles={int(reset_cycles)}" if reset_cycles is not None else "",
                     f"--randomize={int(randomize)}" if randomize is not None else "",
                     "--vcd" if self.out == YosystbOutput.VCD else "",
                  ]
