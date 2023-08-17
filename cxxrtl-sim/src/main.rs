@@ -339,30 +339,34 @@ impl Driver {
     }
 
     async fn start(&mut self, tx: Sender<ClockEdge>, max_cycles: usize, count: Arc<AtomicUsize>) {
+        if let Some(vcd) = &mut self.vcd {
+            vcd.sample(0);
+        }
         for i in 0..max_cycles {
+            // falling edge
             self.clk.set(false);
-            self.handle.step();
-            if let Some(vcd) = &mut self.vcd {
-                vcd.sample(i as u64 * 2);
-            }
             while let Err(_) = tx.send(ClockEdge::Falling) {
                 task::yield_now().await;
             }
             task::yield_now().await;
-            self.clk.set(true);
             self.handle.step();
             if let Some(vcd) = &mut self.vcd {
-                vcd.sample(i as u64 * 2 + 1);
+                vcd.sample(i as u64 * 2);
             }
+
+            // rigsing edge
+            self.clk.set(true);
             while let Err(_) = tx.send(ClockEdge::Rising) {
                 task::yield_now().await;
             }
-            count.fetch_add(1, Ordering::Relaxed);
             task::yield_now().await;
+            self.handle.step();
             if let Some(vcd) = &mut self.vcd {
+                vcd.sample(i as u64 * 2 + 1);
                 let stdout = std::io::stdout().lock();
                 vcd.write(stdout).unwrap();
             }
+            count.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

@@ -171,12 +171,11 @@ class YosystbExecBase(Stage):
                     f"-i={interface.data}",
                     f"-v=out.sv",
                     f"-d={data.data}",
-                ]
+                    f"--randomize={int(randomize)}" if randomize is not None else "",
+                    "--vcd" if self.out == YosystbOutput.VCD else "",
+                 ]
             )
-
-            if self.out == YosystbOutput.VCD:
-                cmd += " --vcd"
-            
+           
             return shell(cmd)
 
         @builder.step()
