@@ -173,6 +173,10 @@ class YosystbExecBase(Stage):
                     f"-d={data.data}",
                 ]
             )
+
+            if self.out == YosystbOutput.VCD:
+                cmd += " --vcd"
+            
             return shell(cmd)
 
         @builder.step()
@@ -198,9 +202,6 @@ class YosystbExecBase(Stage):
             builder.ctx.append("to_verilog")
             verilog_stream = builder.also_do_path(input, path, config)
             builder.ctx.pop()
-            # If this is a VCD, we need to add the VCD generation code
-            if self.out == YosystbOutput.VCD:
-                verilog_stream = add_vcd_gen(verilog_stream)
             # Save the verilog stream into the temporary directory
             self.save_file(builder, verilog_stream, dir, "out.sv")
 
@@ -216,23 +217,19 @@ class YosystbExecBase(Stage):
 
         # Run the program
         out = run(dir, interface_path, data_path)
+        return out
 
-        if self.out == YosystbOutput.VCD:
-            return read_vcd(dir)
-        else:
-            return out
+class YosystbVCD(YosystbExecBase):
+    """
+    Execute a Filament generated verilog program through the yosystb testbench
+    """
 
-# class YosystbVCD(YosystbExecBase):
-#     """
-#     Execute a Filament generated verilog program through the yosystb testbench
-#     """
-
-#     def __init__(self):
-#         super().__init__(
-#             target_state="yosystb-vcd",
-#             out=YosystbOutput.VCD,
-#             description="Run a Filament program through the yosystb testbench and generate a VCD",
-#         )
+    def __init__(self):
+        super().__init__(
+            target_state="yosystb-vcd",
+            out=YosystbOutput.VCD,
+            description="Run a Filament program through the yosystb testbench and generate a VCD",
+        )
 
 
 class YosystbOut(YosystbExecBase):
@@ -249,4 +246,4 @@ class YosystbOut(YosystbExecBase):
 
 
 # Export the defined stages to fud
-__STAGES__ = [YosystbOut]
+__STAGES__ = [YosystbOut, YosystbVCD]

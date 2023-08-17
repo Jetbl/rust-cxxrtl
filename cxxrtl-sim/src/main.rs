@@ -1,6 +1,7 @@
 use clap::Parser;
-use cxxrtl::{CxxrtlHandle, CxxrtlSignal, _cxxrtl_toplevel};
+use cxxrtl::{CxxrtlHandle, CxxrtlSignal, Vcd, _cxxrtl_toplevel};
 use futures::future::{self, Either};
+use futures::pin_mut;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +17,6 @@ use std::{
 };
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::task::JoinError;
-
 use tokio::{runtime, task};
 
 #[derive(Parser)]
@@ -44,6 +44,10 @@ struct Cli {
     /// Sets the number of max cycles
     #[arg(long, default_value_t = 10000)]
     max_cycles: usize,
+
+    /// Generates a vcd file
+    #[arg(long)]
+    vcd: bool,
 }
 
 struct Builder {
@@ -304,17 +308,23 @@ enum ClockEdge {
     Falling,
 }
 
-struct Clock {
+struct Driver {
     handle: Arc<CxxrtlHandle>,
     clk: CxxrtlSignal<1>,
     reset: CxxrtlSignal<1>,
+    vcd: Option<Vcd>,
 }
 
-impl Clock {
-    fn new(handle: Arc<CxxrtlHandle>) -> Option<Self> {
+impl Driver {
+    fn new(handle: Arc<CxxrtlHandle>, vcd: Option<Vcd>) -> Option<Self> {
         let clk = handle.get("clk")?.signal();
         let reset = handle.get("reset")?.signal::<1>();
-        Some(Self { handle, clk, reset })
+        Some(Self {
+            handle,
+            clk,
+            reset,
+            vcd,
+        })
     }
     async fn reset(&mut self, mut reset_cycles: usize) {
         self.reset.set(true);
@@ -329,20 +339,30 @@ impl Clock {
     }
 
     async fn start(&mut self, tx: Sender<ClockEdge>, max_cycles: usize, count: Arc<AtomicUsize>) {
-        for _ in 0..max_cycles {
+        for i in 0..max_cycles {
             self.clk.set(false);
             self.handle.step();
+            if let Some(vcd) = &mut self.vcd {
+                vcd.sample(i as u64 * 2);
+            }
             while let Err(_) = tx.send(ClockEdge::Falling) {
                 task::yield_now().await;
             }
             task::yield_now().await;
             self.clk.set(true);
             self.handle.step();
+            if let Some(vcd) = &mut self.vcd {
+                vcd.sample(i as u64 * 2 + 1);
+            }
             while let Err(_) = tx.send(ClockEdge::Rising) {
                 task::yield_now().await;
             }
             count.fetch_add(1, Ordering::Relaxed);
             task::yield_now().await;
+            if let Some(vcd) = &mut self.vcd {
+                let stdout = std::io::stdout().lock();
+                vcd.write(stdout).unwrap();
+            }
         }
     }
 }
@@ -384,14 +404,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 interface.cxxrtl_signal.as_ref().unwrap().set(false);
             }
         }
-        let mut clk = Clock::new(dut.handle.clone()).unwrap();
-        clk.reset(reset_cycles).await;
+        let vcd = cli.vcd.then(|| {
+            let mut vcd = Vcd::new();
+            vcd.timescale(cxxrtl::TimescaleNumber::One, cxxrtl::TimescaleUnit::Us);
+            // vcd.add_without_memories(&blink.handle);
+            vcd.add(&dut.handle);
+            vcd
+        });
+        let mut driver = Driver::new(dut.handle.clone(), vcd).unwrap();
+        driver.reset(reset_cycles).await;
 
         let count = Arc::new(AtomicUsize::new(0));
-        let clk_tx = clk_ch_tx.clone();
-        let cycles_count = count.clone();
-        let clk_handle =
-            tokio::spawn(async move { clk.start(clk_tx, max_cycles, cycles_count).await });
 
         let interfaces = Arc::new(interfaces);
         let clk_tx = clk_ch_tx.clone();
@@ -429,22 +452,35 @@ fn main() -> Result<(), Box<dyn Error>> {
             future::join_all(outputs).await
         });
 
+        let clk_tx = clk_ch_tx.clone();
+        let cycles_count = count.clone();
+        // let clk_handle =
+        //     tokio::spawn(async move { driver.start(clk_tx, max_cycles, cycles_count).await });
+        let clk_handle = driver.start(clk_tx, max_cycles, cycles_count);
+        pin_mut!(clk_handle);
+
         match future::select(clk_handle, main_handle).await {
             Either::Left((_, _)) => Err(count.load(Ordering::Relaxed)),
             Either::Right((outputs, _)) => {
                 let outputs: Result<Vec<Output>, JoinError> =
                     outputs.unwrap().into_iter().collect();
-                Ok((outputs.unwrap(), count.load(Ordering::Relaxed)))
+                Ok((
+                    outputs.unwrap(),
+                    count.load(Ordering::Relaxed),
+                    // driver.vcd_out,
+                ))
             }
         }
     });
 
-    let outputs = outputs.unwrap();
-    let mut data_outputs = DataOutput::new();
-    data_outputs.extend(outputs.0.into_iter().enumerate());
-    // also substract the 1 cycle it takes to propagate the go signal
-    data_outputs.cycles = outputs.1 - 1;
-    print!("{}", serde_json::to_string(&data_outputs)?);
+    let (outputs, count) = outputs.unwrap();
+    if !cli.vcd {
+        let mut data_outputs = DataOutput::new();
+        data_outputs.extend(outputs.into_iter().enumerate());
+        // also substract the 1 cycle it takes to propagate the go signal
+        data_outputs.cycles = count - 1;
+        print!("{}", serde_json::to_string(&data_outputs)?);
+    }
     Ok(())
 }
 

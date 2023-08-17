@@ -47,6 +47,8 @@ pub struct Vcd {
     vcd: cxxrtl_sys::cxxrtl_vcd,
 }
 
+unsafe impl Send for Vcd {}
+
 impl Vcd {
     pub fn new() -> Self {
         Vcd {
