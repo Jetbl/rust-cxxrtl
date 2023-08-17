@@ -136,13 +136,13 @@ impl Interfaces {
         }
         for signal in &mut self.inputs {
             signal.cxxrtl_signal = dut.handle.get(&signal.name).map(|o| {
-                assert!(signal.width == o.width as usize);
+                assert!(signal.width == o.width as usize && signal.width <= 32);
                 o.signal()
             });
         }
         for signal in &mut self.outputs {
             signal.cxxrtl_signal = dut.handle.get(&signal.name).map(|o| {
-                assert!(signal.width == o.width as usize);
+                assert!(signal.width == o.width as usize && signal.width <= 32);
                 o.signal()
             });
         }
