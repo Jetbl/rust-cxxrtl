@@ -1,5 +1,5 @@
 use cxxrtl_sys::{
-    _cxxrtl_handle, _cxxrtl_toplevel, cxxrtl_create, cxxrtl_destroy,
+    _cxxrtl_handle, _cxxrtl_toplevel, cxxrtl_create, cxxrtl_create_at, cxxrtl_destroy,
     cxxrtl_flag_CXXRTL_DRIVEN_COMB, cxxrtl_flag_CXXRTL_DRIVEN_SYNC, cxxrtl_flag_CXXRTL_INPUT,
     cxxrtl_flag_CXXRTL_OUTPUT, cxxrtl_flag_CXXRTL_UNDRIVEN, cxxrtl_get, cxxrtl_object, cxxrtl_step,
 };
@@ -172,6 +172,7 @@ unsafe impl<const N: u32> Sync for CxxrtlSignal<N> {}
 
 pub struct CxxrtlHandle {
     pub(crate) handle: *mut _cxxrtl_handle,
+    pub(crate) name: Option<String>,
 }
 
 unsafe impl Send for CxxrtlHandle {}
@@ -180,11 +181,27 @@ unsafe impl Sync for CxxrtlHandle {}
 impl CxxrtlHandle {
     pub unsafe fn new(top: *mut _cxxrtl_toplevel) -> Self {
         let handle = cxxrtl_create(top);
-        Self { handle }
+        Self { handle, name: None }
+    }
+
+    pub unsafe fn new_at(top: *mut _cxxrtl_toplevel, name: &str) -> Self {
+        let cs = CString::new(name).expect("CString::new failed");
+        let handle = cxxrtl_create_at(top, cs.as_ptr());
+        Self {
+            handle,
+            name: Some(format!("{name} ")),
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<CxxrtlObject> {
-        let cs = CString::new(name).expect("CString::new failed");
+        let cs = if let Some(n) = &self.name {
+            let mut n = n.clone();
+            n.push_str(name);
+            CString::new(n)
+        } else {
+            CString::new(name)
+        }
+        .ok()?;
         let obj = unsafe { cxxrtl_get(self.handle, cs.as_ptr()) };
         (!obj.is_null()).then(|| CxxrtlObject::new(obj))
     }

@@ -48,6 +48,10 @@ struct Cli {
     /// Generates a vcd file
     #[arg(long)]
     vcd: bool,
+
+    /// Comma separated list of signed output
+    #[arg(long)]
+    signed_outputs: Option<String>,
 }
 
 struct Builder {
@@ -74,11 +78,11 @@ impl Builder {
                 "-q",
                 "-p",
                 &format!(
-                    "hierarchy -top main; write_cxxrtl -O0 {}",
+                    "read_verilog -sv -nosynthesis {}; hierarchy -top main; write_cxxrtl -O0 -print-output std::cerr {}",
+                    source.display(),
                     cc_file.to_string_lossy()
                 ),
             ])
-            .arg(&source)
             .status()?;
 
         Command::new("clang++")
@@ -107,7 +111,7 @@ struct Event {
 struct Interface {
     #[serde(flatten)]
     event: Event,
-    name: String,
+    name: Option<String>,
     #[serde(skip)]
     cxxrtl_signal: Option<CxxrtlSignal<1>>,
 }
@@ -131,7 +135,10 @@ impl Interfaces {
     fn set_cxxrtl_signals(&mut self, dut: &Dut) {
         for interface in &mut self.interfaces {
             if !interface.event.phantom {
-                interface.cxxrtl_signal = dut.handle.get(&interface.name).map(|o| o.signal());
+                interface.cxxrtl_signal = dut
+                    .handle
+                    .get(interface.name.as_ref().unwrap())
+                    .map(|o| o.signal());
             }
         }
         for signal in &mut self.inputs {
@@ -164,12 +171,14 @@ struct Signal {
     interval: Interval,
     #[serde(skip)]
     cxxrtl_signal: Option<CxxrtlSignal<32>>,
+    #[serde(skip)]
+    signed: bool,
 }
 
 #[derive(Deserialize, Debug)]
 struct DataInput {
     #[serde(flatten)]
-    inputs: HashMap<String, Vec<u32>>,
+    inputs: HashMap<String, Vec<i32>>,
 }
 
 impl DataInput {
@@ -190,7 +199,7 @@ impl DataInput {
 }
 
 struct DataInputIter<'a> {
-    data: HashMap<String, Iter<'a, u32>>,
+    data: HashMap<String, Iter<'a, i32>>,
 }
 
 impl<'a> Iterator for DataInputIter<'a> {
@@ -204,11 +213,11 @@ impl<'a> Iterator for DataInputIter<'a> {
 
 #[derive(Debug)]
 struct Input {
-    input: HashMap<String, u32>,
+    input: HashMap<String, i32>,
 }
 
 impl Input {
-    fn new<'a, I: Iterator<Item = (&'a String, Option<&'a u32>)>>(iter: I) -> Option<Self> {
+    fn new<'a, I: Iterator<Item = (&'a String, Option<&'a i32>)>>(iter: I) -> Option<Self> {
         let mut input = HashMap::new();
         for (k, v) in iter {
             let v = v?;
@@ -222,6 +231,7 @@ impl Input {
 #[derive(Debug, Default)]
 struct Values {
     values: Vec<(usize, u32)>,
+    signal: (usize, bool),
 }
 
 impl Serialize for Values {
@@ -231,24 +241,45 @@ impl Serialize for Values {
     {
         let mut map = serializer.serialize_map(Some(self.values.len()))?;
         for (t, v) in &self.values {
-            map.serialize_entry(&t.to_string(), &vec![v])?;
+            if self.signal.1 {
+                match self.signal.0 {
+                    8 => map.serialize_entry(&t.to_string(), &vec![*v as i8])?,
+                    16 => map.serialize_entry(&t.to_string(), &vec![*v as i16])?,
+                    32 => map.serialize_entry(&t.to_string(), &vec![*v as i32])?,
+                    w => panic!("width not supported {w}"),
+                }
+            } else {
+                map.serialize_entry(&t.to_string(), &vec![v])?
+            }
         }
         map.end()
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize)]
 struct DataOutput {
     #[serde(flatten)]
     output: HashMap<String, Values>,
     cycles: usize,
+    #[serde(skip)]
+    signals: HashMap<String, Signal>,
 }
 
 impl DataOutput {
-    fn new() -> Self {
+    fn new(output_signals: Vec<Signal>, signed_outputs: Option<String>) -> Self {
+        let signed_outputs = signed_outputs.unwrap_or_else(|| String::new());
+        let signed_outputs = signed_outputs.split(',').collect::<Vec<_>>();
+        let signals = output_signals
+            .into_iter()
+            .map(|mut s| {
+                s.signed = signed_outputs.contains(&s.name.as_str());
+                (s.name.clone(), s)
+            })
+            .collect();
         Self {
             output: Default::default(),
             cycles: 0,
+            signals,
         }
     }
 }
@@ -257,7 +288,10 @@ impl Extend<(usize, Output)> for DataOutput {
     fn extend<T: IntoIterator<Item = (usize, Output)>>(&mut self, iter: T) {
         for (t, output) in iter {
             for (k, v) in output.output {
+                let signal = self.signals.get(k.as_str()).unwrap();
                 let values = self.output.entry(k).or_insert(Default::default());
+                values.signal.0 = signal.width;
+                values.signal.1 = signal.signed;
                 values.values.push((t, v));
             }
         }
@@ -293,7 +327,7 @@ impl Dut {
                 lib.get(b"cxxrtl_design_create").unwrap();
             let top = func();
             std::mem::forget(lib);
-            CxxrtlHandle::new(top)
+            CxxrtlHandle::new_at(top, "main")
         };
 
         Self {
@@ -378,7 +412,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::fs::create_dir(&out)?;
     }
 
-    let data_file = File::open(cli.data_file)?;
+    let data_file = File::open(&cli.data_file)?;
     let data: DataInput = serde_json::from_reader(data_file)?;
     data.validate();
 
@@ -388,11 +422,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let dest = out.join(file_name).with_extension("so");
     builder.build(&source, &dest)?;
 
-    let interfaces_file = File::open(cli.interface_file)?;
+    let interfaces_file = File::open(&cli.interface_file)?;
     let mut interfaces: Interfaces = serde_json::from_reader(interfaces_file)?;
     interfaces.validate();
     let dut = Dut::new(&dest);
     interfaces.set_cxxrtl_signals(&dut);
+
+    let interfaces = Arc::new(interfaces);
+    let intefaces_clone = interfaces.clone();
 
     let rt = runtime::Builder::new_current_thread().build()?;
     let outputs = rt.block_on(async {
@@ -420,9 +457,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let count = Arc::new(AtomicUsize::new(0));
 
-        let interfaces = Arc::new(interfaces);
         let clk_tx = clk_ch_tx.clone();
-        // let main_handle = task::spawn(process(data, clk_ch_tx, interfaces, randomize));
         let main_handle = task::spawn(async move {
             let mut rx = clk_tx.subscribe();
             // New transaction should only trigger at the start of a cycle
@@ -458,8 +493,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let clk_tx = clk_ch_tx.clone();
         let cycles_count = count.clone();
-        // let clk_handle =
-        //     tokio::spawn(async move { driver.start(clk_tx, max_cycles, cycles_count).await });
         let clk_handle = driver.start(clk_tx, max_cycles, cycles_count);
         pin_mut!(clk_handle);
 
@@ -468,18 +501,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             Either::Right((outputs, _)) => {
                 let outputs: Result<Vec<Output>, JoinError> =
                     outputs.unwrap().into_iter().collect();
-                Ok((
-                    outputs.unwrap(),
-                    count.load(Ordering::Relaxed),
-                    // driver.vcd_out,
-                ))
+                Ok((outputs.unwrap(), count.load(Ordering::Relaxed)))
             }
         }
     });
 
     let (outputs, count) = outputs.unwrap();
     if !cli.vcd {
-        let mut data_outputs = DataOutput::new();
+        let interfaces = Arc::into_inner(intefaces_clone).unwrap();
+        let mut data_outputs = DataOutput::new(interfaces.outputs, cli.signed_outputs);
         data_outputs.extend(outputs.into_iter().enumerate());
         // also substract the 1 cycle it takes to propagate the go signal
         data_outputs.cycles = count - 1;
@@ -508,7 +538,7 @@ async fn process_input(
             assert!(interval.event == event.name);
             if st >= interval.start && st < interval.end {
                 let value = input.input[&inp.name];
-                inp.cxxrtl_signal.as_ref().unwrap().set(value);
+                inp.cxxrtl_signal.as_ref().unwrap().set(value as u32);
             }
         }
 

@@ -166,6 +166,9 @@ class YosystbExecBase(Stage):
             # Number of reset cycles
             reset_cycles = config.get(["stages", self.name, "reset-cycles"])
 
+            # signed outputs
+            signed_outputs = config.get(["stages", self.name, "signed-outputs"])
+
             cmd = " ".join(
                 [
                     config["stages", self.name, "exec"],
@@ -174,6 +177,7 @@ class YosystbExecBase(Stage):
                     f"-d={data.data}",
                     f"--reset-cycles={int(reset_cycles)}" if reset_cycles is not None else "",
                     f"--randomize={int(randomize)}" if randomize is not None else "",
+                    f"--signed-outputs={signed_outputs}" if signed_outputs is not None else "",
                     "--vcd" if self.out == YosystbOutput.VCD else "",
                  ]
             )
