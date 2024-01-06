@@ -145,7 +145,7 @@ impl CxxrtlObject {
     fn values<const N: u32>(&self) -> (Value<N>, Option<Value<N>>) {
         let curr = unsafe { Value::new((*self.obj).curr) };
         let next = (unsafe { *self.obj }).next;
-        let next = (!next.is_null()).then_some(unsafe { Value::new(next) });
+        let next = (!next.is_null()).then(|| unsafe { Value::new(next) });
         (curr, next)
     }
 
